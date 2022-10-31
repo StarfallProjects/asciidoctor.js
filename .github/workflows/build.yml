@@ -3,30 +3,43 @@ name: Build
 on:
   push:
     branches:
-      - master
+      - 'main'
+    tags-ignore:
+      - '**'
+    paths-ignore:
+      - 'docs/**'
   pull_request:
-    branches:
-      - '*'
+    paths-ignore:
+      - 'docs/**'
 
 jobs:
+  activate:
+    if: |
+      (github.event_name == 'schedule' && github.repository_owner == 'asciidoctor') ||
+      (github.event_name != 'schedule' && !endsWith(github.event.head_commit.message, '[skip ci]'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Proceed
+        run: echo ok go
   build:
+    needs: activate
     strategy:
       matrix:
         os: [ubuntu-latest]
-        node-version: [12.x, 14.x]
-        asciidoctor-core-version: [v2.0.15, master]
+        node-version: [18, 19]
+        asciidoctor-core-version: [v2.0.18, main]
         experimental: [false]
         include:
-          - node-version: 14.x
+          - node-version: 18
             os: macos-latest
             experimental: true
-            asciidoctor-core-version: v2.0.15
+            asciidoctor-core-version: v2.0.18
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental }}
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: Set up Node ${{ matrix.node-version }}
-      uses: actions/setup-node@v1
+      uses: actions/setup-node@v3
       with:
         node-version: ${{ matrix.node-version }}
     # libgbm-dev is required by Puppeteer 3+
@@ -46,17 +59,18 @@ jobs:
         npm run test
         npm run travis --prefix packages/core
   build-windows:
+    needs: activate
     runs-on: windows-latest
     strategy:
       matrix:
         node-version:
-          - 12.x
-          - 14.x
-        asciidoctor-core-version: [v2.0.15, master]
+          - 18
+          - 19
+        asciidoctor-core-version: [v2.0.18, main]
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: Set up Node ${{ matrix.node-version }}
-        uses: actions/setup-node@v1
+        uses: actions/setup-node@v3
         with:
           node-version: ${{ matrix.node-version }}
       - name: Install dependencies
@@ -67,12 +81,12 @@ jobs:
         env:
           ASCIIDOCTOR_CORE_VERSION: ${{ matrix.asciidoctor-core-version }}
         working-directory: ./packages/core
-        run: node tasks/build.js
+        run: node tasks/build.cjs
       - name: Test Build
         env:
           ASCIIDOCTOR_CORE_VERSION: ${{ matrix.asciidoctor-core-version }}
         working-directory: ./packages/core
-        run: node tasks/test/unsupported-features.js
+        run: node tasks/test/unsupported-features.cjs
       - name: Test Node
         env:
           ASCIIDOCTOR_CORE_VERSION: ${{ matrix.asciidoctor-core-version }}

@@ -1,5 +1,5 @@
 /// <reference types="node" />
-// TypeScript Version: 3.6
+// TypeScript Version: 3.7
 export namespace Asciidoctor {
   import Author = Document.Author;
   import Title = Document.Title;
@@ -605,7 +605,123 @@ export namespace Asciidoctor {
     }
   }
 
+  /**
+   * List of the contexts of all the built-in blocks in AsciiDoc.
+   * @see https://docs.asciidoctor.org/asciidoc/latest/blocks/#summary-of-built-in-contexts
+   */
+  enum BuiltInContext {
+    /**
+     * One of five admonition blocks.
+     */
+    Admonition = "admonition",
+    /**
+     * An audio block.
+     */
+    Audio = "audio",
+    /**
+     * A callout list.
+     */
+    CalloutList = "colist",
+    /**
+     * A description list.
+     */
+    DescriptionList = "dlist",
+    /**
+     * The top-level document or the document in an AsciiDoc table cell.
+     */
+    Document = "document",
+    /**
+     * An example block.
+     */
+    Example = "example",
+    /**
+     * A discrete heading.
+     */
+    FloatingTitle = "floating_title",
+    /**
+     * An image block.
+     */
+    Image = "image",
+    /**
+     * An item in an ordered, unordered, or description list (only relevant inside a list or description list block). In a description list, this block is used to represent the term and the description.
+     */
+    ListItem = "list_item",
+    /**
+     * A listing block.
+     */
+    Listing = "list_item",
+    /**
+     * A literal block.
+     */
+    Literal = "list_item",
+    /**
+     * An ordered list.
+     */
+    OrderedList = "olist",
+    /**
+     * An open block.
+     */
+    Open = "open",
+    /**
+     * A page break.
+     */
+    PageBreak = "page_break",
+    /**
+     * A paragraph.
+     */
+    Paragraph = "paragraph",
+    /**
+     * A passthrough block.
+     */
+    Passthrough = "pass",
+    /**
+     * The preamble of the document.
+     */
+    Preamble = "preamble",
+    /**
+     * A quote block (aka blockquote).
+     */
+    Quote = "quote",
+    /**
+     * A section. May also be a part, chapter, or special section.
+     */
+    Section = "section",
+    /**
+     * A sidebar block.
+     */
+    Sidebar = "sidebar",
+    /**
+     * A table block.
+     */
+    Table = "table",
+    /**
+     * A table cell (only relevant inside a table block).
+     */
+    TableCell = "table_cell",
+    /**
+     * A thematic break (aka horizontal rule).
+     */
+    ThematicBreak = "thematic_break",
+    /**
+     * A TOC block.
+     */
+    TableOfContent = "toc",
+    /**
+     * An unordered list.
+     */
+    UnorderedList = "ulist",
+    /**
+     * An unordered list.
+     */
+    Verse = "verse",
+    /**
+     * A video block.
+     */
+    Video = "video",
+  }
+
   interface Selector {
+    context: BuiltInContext | string
     [key: string]: any;
   }
 
@@ -1584,6 +1700,13 @@ export namespace Asciidoctor {
    */
   class Document extends AbstractBlock {
     /**
+     * Returns the SyntaxHighlighter associated with this document.
+     *
+     * @returns the {SyntaxHighlighter} associated with this document.
+     */
+    getSyntaxHighlighter(): SyntaxHighlighter;
+
+    /**
      * Returns a JSON {Object} of references captured by the processor.
      *
      * @returns a JSON object of {Asciidoctor/AbstractNode} in the document.
@@ -1840,8 +1963,19 @@ export namespace Asciidoctor {
     parse(data?: string | string[]): Document;
 
     /**
+     * Read the docinfo file(s) for inclusion in the document template
+     *
+     * If the docinfo1 attribute is set, read the docinfo.ext file.
+     * If the docinfo attribute is set, read the doc-name.docinfo.ext file.
+     * If the docinfo2 attribute is set, read both files in that order.
+     *
+     * @param location - The Symbol location of the docinfo (e.g., head, footer, etc). (default: head)
+     * @param suffix   - The suffix of the docinfo file(s).
+     * If not set, the extension will be set to the outfilesuffix. (default: undefined)
+     *
+     * @returns the contents of the docinfo file(s) or empty string if no files are found or the safe mode is secure or greater.
      */
-    getDocinfo(): void;
+    getDocinfo(location: string, suffix?: string): string;
 
     /**
      * @param [docinfoLocation] - A {string} for checking docinfo extensions at a given location (head or footer) (default: head)
@@ -2116,6 +2250,8 @@ export namespace Asciidoctor {
      * that match the specified selector (context, style, id, and/or role).
      * If a function block is given, it's used as an additional filter.
      * If no selector or function block is supplied, all block-level nodes in the tree are returned.
+     * Valid context names include {@link BuiltInContext}.
+     *
      * @example
      * doc.findBy({'context': 'section'});
      * // => { level: 0, title: "Hello, AsciiDoc!", blocks: 0 }
@@ -2129,7 +2265,7 @@ export namespace Asciidoctor {
      *
      * @returns a list of block-level nodes that match the filter or an empty list if no matches are found
      */
-    findBy(selector: Selector | ((block: AbstractBlock) => boolean | string)): AbstractBlock[];
+    findBy(selector: Selector | ((block: AbstractBlock) => boolean | string), block?: ((block: AbstractBlock) => boolean | string)): AbstractBlock[];
 
     /**
      * Get the source line number where this block started.
@@ -2235,6 +2371,14 @@ export namespace Asciidoctor {
      * @param value - The section name
      */
     setSectionName(value: string): void;
+
+    /**
+     * Get the section number of this section.
+     */
+    getSectionNumeral(): string;
+
+    // alias
+    getSectionNumber(): string;
 
     /**
      * Get the flag to indicate whether this is a special section or a child of one.
@@ -3437,6 +3581,48 @@ export namespace Asciidoctor {
     register(name: string, template: Template): TemplateConverter.TemplateIndexed;
   }
 
+  /**
+   * A {Converter} implementation that delegates to the chain of {Converter}
+   * objects passed to the constructor. Selects the first {Converter} that
+   * identifies itself as the handler for a given transform.
+   */
+  class CompositeConverter extends Converter {
+    /**
+     * Delegates to the first converter that identifies itself as the handler for the given transform.
+     * The optional Hash is passed as the last option to the delegate's convert method.
+     *
+     * @param node - the AbstractNode to convert
+     * @param [transform] - the optional {string} transform, or the name of the node if no transform is specified. (optional, default: undefined)
+     * @param [opts] - an optional JSON that is passed as local variables to the template. (optional, default: undefined)
+     * @returns The {string} result from the delegate's convert method
+     */
+    convert(node: AbstractNode, transform?: string, opts?: any): string;
+
+    /**
+     * Checks whether there is a template registered with the specified name.
+     *
+     * @param name - the {string} template name
+     * @returns a {boolean} that indicates whether a template is registered for the specified template name.
+     */
+    handles(name: string): boolean;
+
+    /**
+     * Retrieves the templates that this converter manages.
+     *
+     * @returns a JSON of template objects keyed by template name
+     */
+    getTemplates(): TemplateConverter.TemplateIndexed;
+
+    /**
+     * Registers a template with this converter.
+     *
+     * @param name - the {string} template name
+     * @param template - the template object to register
+     * @returns the template object
+     */
+    register(name: string, template: Template): TemplateConverter.TemplateIndexed;
+  }
+
   namespace Template {
     interface Context {
       node: AbstractNode;
@@ -3609,6 +3795,8 @@ export class Asciidoctor {
    * @returns the version number of Asciidoctor.js.
    */
   getVersion(): string;
+
+  BuiltInContext: typeof Asciidoctor.BuiltInContext;
 
   Block: typeof Asciidoctor.Block;
 

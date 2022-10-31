@@ -55,6 +55,10 @@ const fromHashKeys = function (hash) {
 const prepareOptions = function (options) {
   options = toHash(options)
   if (options) {
+    const converter = options['$[]']('converter')
+    if (converter && converter !== Opal.nil) {
+      options['$[]=']('converter', bridgeConverter(converter))
+    }
     const attrs = options['$[]']('attributes')
     if (attrs && typeof attrs === 'object' && attrs.constructor.name === 'Object') {
       options = options.$dup()
@@ -62,6 +66,124 @@ const prepareOptions = function (options) {
     }
   }
   return options
+}
+
+const bridgeConverter = function (converter) {
+  const buildBackendTraitsFromObject = function (obj) {
+    return Object.assign({},
+      obj.basebackend ? { basebackend: obj.basebackend } : {},
+      obj.outfilesuffix ? { outfilesuffix: obj.outfilesuffix } : {},
+      obj.filetype ? { filetype: obj.filetype } : {},
+      obj.htmlsyntax ? { htmlsyntax: obj.htmlsyntax } : {},
+      obj.supports_templates ? { supports_templates: obj.supports_templates } : {}
+    )
+  }
+  const assignBackendTraitsToInstance = function (obj, instance) {
+    if (obj.backend_traits) {
+      instance.backend_traits = toHash(obj.backend_traits)
+    } else if (obj.backendTraits) {
+      instance.backend_traits = toHash(obj.backendTraits)
+    } else if (obj.basebackend || obj.outfilesuffix || obj.filetype || obj.htmlsyntax || obj.supports_templates) {
+      instance.backend_traits = toHash(buildBackendTraitsFromObject(obj))
+    }
+  }
+  const bridgeHandlesMethodToInstance = function (obj, instance) {
+    bridgeMethodToInstance(obj, instance, '$handles?', 'handles', function () {
+      return true
+    })
+  }
+  const bridgeComposedMethodToInstance = function (obj, instance) {
+    bridgeMethodToInstance(obj, instance, '$composed', 'composed')
+  }
+  const bridgeEqEqMethodToInstance = function (obj, instance) {
+    bridgeMethodToInstance(obj, instance, '$==', '==', function (other) {
+      return instance === other
+    })
+  }
+  const bridgeSendMethodToInstance = function (obj, instance) {
+    bridgeMethodToInstance(obj, instance, '$send', 'send', function (symbol) {
+      const [, ...args] = Array.from(arguments)
+      const func = instance['$' + symbol]
+      if (func) {
+        return func.apply(instance, args)
+      }
+      throw new Error(`undefined method \`${symbol}\` for \`${instance.toString()}\``)
+    })
+  }
+  const bridgeMethodToInstance = function (obj, instance, methodName, functionName, defaultImplementation) {
+    if (typeof obj[methodName] === 'undefined') {
+      if (typeof obj[functionName] === 'function') {
+        instance[methodName] = obj[functionName]
+      } else if (defaultImplementation) {
+        instance[methodName] = defaultImplementation
+      }
+    }
+  }
+  const addRespondToMethod = function (instance) {
+    if (typeof instance['$respond_to?'] !== 'function') {
+      instance['$respond_to?'] = function (name) {
+        return typeof this[name] === 'function'
+      }
+    }
+  }
+  if (typeof converter === 'function') {
+    // Class
+    const object = initializeClass(ConverterBase, converter.constructor.name, {
+      initialize: function (backend, opts) {
+        const self = this
+        const result = new converter(backend, opts) // eslint-disable-line
+        Object.assign(this, result)
+        assignBackendTraitsToInstance(result, self)
+        const propertyNames = Object.getOwnPropertyNames(converter.prototype)
+        for (let i = 0; i < propertyNames.length; i++) {
+          const propertyName = propertyNames[i]
+          if (propertyName !== 'constructor') {
+            self[propertyName] = result[propertyName]
+          }
+        }
+        if (typeof result.$convert === 'undefined' && typeof result.convert === 'function') {
+          self.$convert = result.convert
+        }
+        bridgeHandlesMethodToInstance(result, self)
+        bridgeComposedMethodToInstance(result, self)
+        addRespondToMethod(self)
+        self.super(backend, opts)
+      }
+    })
+    object.$extend(ConverterBackendTraits)
+    return object
+  }
+  if (typeof converter === 'object') {
+    // Instance
+    if (typeof converter.$convert === 'undefined' && typeof converter.convert === 'function') {
+      converter.$convert = converter.convert
+    }
+    assignBackendTraitsToInstance(converter, converter)
+    if (converter.backend_traits) {
+      // "extends" ConverterBackendTraits
+      const converterBackendTraitsFunctionNames = [
+        'basebackend',
+        'filetype',
+        'htmlsyntax',
+        'outfilesuffix',
+        'supports_templates',
+        'supports_templates?',
+        'init_backend_traits',
+        'backend_traits'
+      ]
+      for (const functionName of converterBackendTraitsFunctionNames) {
+        converter['$' + functionName] = ConverterBackendTraits.prototype['$' + functionName]
+      }
+      converter.$$meta = ConverterBackendTraits
+    }
+    bridgeHandlesMethodToInstance(converter, converter)
+    bridgeComposedMethodToInstance(converter, converter)
+    bridgeEqEqMethodToInstance(converter, converter)
+    bridgeSendMethodToInstance(converter, converter)
+    addRespondToMethod(converter)
+    return converter
+  }
+  return converter
 }
 
 function initializeClass (superClass, className, functions, defaultFunctions, argProxyFunctions) {
@@ -255,7 +377,19 @@ Asciidoctor.prototype.convert = function (input, options) {
   if (typeof input === 'object' && input.constructor.name === 'Buffer') {
     input = input.toString('utf8')
   }
-  const result = this.$convert(input, prepareOptions(options))
+  const toFile = options && options.to_file
+  if (typeof toFile === 'object' && toFile.constructor.name === 'Writable' && typeof toFile.write === 'function') {
+    toFile['$respond_to?'] = (name) => name === 'write'
+    toFile.$object_id = () => ''
+    toFile.$write = function (data) {
+      this.write(data)
+    }
+  }
+  const opts = prepareOptions(options)
+  const result = this.$convert(input, opts)
+  if (typeof toFile === 'object' && toFile.constructor.name === 'Writable' && typeof toFile.end === 'function') {
+    toFile.end()
+  }
   return result === Opal.nil ? '' : result
 }
 
@@ -546,10 +680,156 @@ AbstractBlock.prototype.convert = function () {
 }
 
 /**
+ * @namespace
+ * @extends BuiltInContext
+ */
+Opal.Asciidoctor.BuiltInContext = {
+  /**
+   * One of five admonition blocks.
+   */
+  Admonition: 'admonition',
+  /**
+   * An audio block.
+   */
+  Audio: 'audio',
+  /**
+   * A callout list.
+   */
+  CalloutList: 'colist',
+  /**
+   * A description list.
+   */
+  DescriptionList: 'dlist',
+  /**
+   * The top-level document or the document in an AsciiDoc table cell.
+   */
+  Document: 'document',
+  /**
+   * An example block.
+   */
+  Example: 'example',
+  /**
+   * A discrete heading.
+   */
+  FloatingTitle: 'floating_title',
+  /**
+   * An image block.
+   */
+  Image: 'image',
+  /**
+   * An item in an ordered, unordered, or description list (only relevant inside a list or description list block). In a description list, this block is used to represent the term and the description.
+   */
+  ListItem: 'list_item',
+  /**
+   * A listing block.
+   */
+  Listing: 'list_item',
+  /**
+   * A literal block.
+   */
+  Literal: 'list_item',
+  /**
+   * An ordered list.
+   */
+  OrderedList: 'olist',
+  /**
+   * An open block.
+   */
+  Open: 'open',
+  /**
+   * A page break.
+   */
+  PageBreak: 'page_break',
+  /**
+   * A paragraph.
+   */
+  Paragraph: 'paragraph',
+  /**
+   * A passthrough block.
+   */
+  Passthrough: 'pass',
+  /**
+   * The preamble of the document.
+   */
+  Preamble: 'preamble',
+  /**
+   * A quote block (aka blockquote).
+   */
+  Quote: 'quote',
+  /**
+   * A section. May also be a part, chapter, or special section.
+   */
+  Section: 'section',
+  /**
+   * A sidebar block.
+   */
+  Sidebar: 'sidebar',
+  /**
+   * A table block.
+   */
+  Table: 'table',
+  /**
+   * A table cell (only relevant inside a table block).
+   */
+  TableCell: 'table_cell',
+  /**
+   * A thematic break (aka horizontal rule).
+   */
+  ThematicBreak: 'thematic_break',
+  /**
+   * A TOC block.
+   */
+  TableOfContent: 'toc',
+  /**
+   * An unordered list.
+   */
+  UnorderedList: 'ulist',
+  /**
+   * An unordered list.
+   */
+  Verse: 'verse',
+  /**
+   * A video block.
+   */
+  Video: 'video'
+}
+
+/**
  * Query for all descendant block-level nodes in the document tree
  * that match the specified selector (context, style, id, and/or role).
  * If a function block is given, it's used as an additional filter.
  * If no selector or function block is supplied, all block-level nodes in the tree are returned.
+ * Valid context names include:
+ * <ul>
+ * <li>admonition - One of five admonition blocks.</li>
+ * <li>audio - An audio block</li>
+ * <li>colist - A callout list.</li>
+ * <li>dlist - A description list.</li>
+ * <li>document - The top-level document or the document in an AsciiDoc table cell.</li>
+ * <li>example - An example block.</li>
+ * <li>floating_title - A discrete heading</li>
+ * <li>image - An image block.</li>
+ * <li>list_item - An item in an ordered, unordered, or description list (only relevant inside a list or description list block). In a description list, this block is used to represent the term and the description.</li>
+ * <li>listing - A listing block.</li>
+ * <li>literal - A literal block.</li>
+ * <li>olist - An ordered list.</li>
+ * <li>open - An open block.</li>
+ * <li>page_break - A page break.</li>
+ * <li>paragraph - A paragraph.</li>
+ * <li>pass - A passthrough block.</li>
+ * <li>preamble - The preamble of the document.</li>
+ * <li>quote - A quote block (aka blockquote).</li>
+ * <li>section - A section. May also be a part, chapter, or special section.</li>
+ * <li>sidebar - A sidebar block.</li>
+ * <li>table - A table block.</li>
+ * <li>table_cell - A table cell (only relevant inside a table block).</li>
+ * <li>thematic_break - A thematic break (aka horizontal rule).</li>
+ * <li>toc - A TOC block (to designate custom TOC placement).</li>
+ * <li>ulist - An unordered list.</li>
+ * <li>verse - A verse block.</li>
+ * <li>video - A video block.</li>
+ * </ul>
+ * @see https://docs.asciidoctor.org/asciidoc/latest/blocks/#summary-of-built-in-contexts
  * @param {Object} [selector]
  * @param {function} [block]
  * @example
@@ -731,6 +1011,17 @@ Section.prototype.getSectionName = function () {
 Section.prototype.setSectionName = function (value) {
   this.sectname = value
 }
+
+/**
+ * Get the section numeral of this section.
+ * @returns {string}
+ * @memberof Section
+ */
+Section.prototype.getSectionNumeral = function () {
+  return this.$sectnum()
+}
+
+Section.prototype.getSectionNumber = Section.prototype.getSectionNumeral
 
 /**
  * Get the flag to indicate whether this is a special section or a child of one.
@@ -1300,6 +1591,40 @@ AbstractNode.prototype.normalizeAssetPath = function (assetRef, assetName, autoC
  * @extends AbstractBlock
  */
 const Document = Opal.Asciidoctor.Document
+
+/**
+ * Returns the SyntaxHighlighter associated with this document.
+ *
+ * @returns {SyntaxHighlighter} - the SyntaxHighlighter associated with this document.
+ * @memberof Document
+ */
+Document.prototype.getSyntaxHighlighter = function () {
+  const syntaxHighlighter = this.syntax_highlighter
+  // eslint-disable-next-line no-proto
+  const prototype = syntaxHighlighter.__proto__
+  if (prototype) {
+    if (typeof prototype['$highlight?'] === 'function') {
+      prototype.handlesHighlighting = function () {
+        const value = prototype['$highlight?']()
+        return value === Opal.nil ? false : value
+      }
+    }
+    if (typeof prototype['$docinfo?'] === 'function') {
+      prototype.hasDocinfo = prototype['$docinfo?']
+    }
+    if (typeof prototype.$format === 'function') {
+      prototype.format = function (node, lang, opts) {
+        return this.$format(node, lang, toHash(opts))
+      }
+    }
+    if (typeof prototype.$docinfo === 'function') {
+      prototype.docinfo = function (location, doc, opts) {
+        return this.$docinfo(location, doc, toHash(opts))
+      }
+    }
+  }
+  return syntaxHighlighter
+}
 
 /**
  * Returns a JSON {Object} of references captured by the processor.
@@ -2073,6 +2398,17 @@ Document.prototype.parse = function (data) {
 }
 
 /**
+ * Read the docinfo file(s) for inclusion in the document template
+ *
+ * If the docinfo1 attribute is set, read the docinfo.ext file.
+ * If the docinfo attribute is set, read the doc-name.docinfo.ext file.
+ * If the docinfo2 attribute is set, read both files in that order.
+ *
+ * @param {string} docinfoLocation - The Symbol location of the docinfo (e.g., head, footer, etc). (default: head)
+ * @param {string|undefined} suffix - The suffix of the docinfo file(s).
+ * If not set, the extension will be set to the outfilesuffix. (default: undefined)
+ *
+ * @returns {string} - the contents of the docinfo file(s) or empty string if no files are found or the safe mode is secure or greater.
  * @memberof Document
  */
 Document.prototype.getDocinfo = function (docinfoLocation, suffix) {
@@ -3342,8 +3678,7 @@ Table.prototype.hasHeaderOption = function () {
  * @memberof Table
  */
 Table.prototype.hasFooterOption = function () {
-  const footerOption = this.getAttributes()['footer-option']
-  return footerOption === ''
+  return this.isOption('footer')
 }
 
 /**
@@ -3352,8 +3687,7 @@ Table.prototype.hasFooterOption = function () {
  * @memberof Table
  */
 Table.prototype.hasAutowidthOption = function () {
-  const autowidthOption = this.getAttributes()['autowidth-option']
-  return autowidthOption === ''
+  return this.isOption('autowidth')
 }
 
 /**
@@ -3775,6 +4109,27 @@ if (TemplateConverter) {
   }
 
   /**
+   * Converts the {AbstractNode} using only its converted content.
+   *
+   * @param {AbstractNode} node
+   * @returns {string} - the converted {string} content.
+   * @memberof Converter/TemplateConverter
+   */
+  TemplateConverter.prototype.getContentOnly = function (node) {
+    return this.$content_only(node)
+  }
+
+  /**
+   * Skips conversion of the {AbstractNode}.
+   *
+   * @param {AbstractNode} node
+   * @memberof Converter/TemplateConverter
+   */
+  TemplateConverter.prototype.skip = function (node) {
+    this.$skip(node)
+  }
+
+  /**
    * Retrieves the templates that this converter manages.
    *
    * @returns {Object} - a JSON of template objects keyed by template name
@@ -3843,4 +4198,243 @@ if (TemplateConverter) {
       }
     }
   }
+}
+
+/**
+ * @namespace
+ * @module Converter/CompositeConverter
+ */
+const CompositeConverter = Opal.Asciidoctor.Converter.CompositeConverter
+
+if (CompositeConverter) {
+  // Alias
+  Opal.Asciidoctor.CompositeConverter = CompositeConverter
+
+  /**
+   * Delegates to the first converter that identifies itself as the handler for the given transform.
+   * The optional Hash is passed as the last option to the delegate's convert method.
+   *
+   * @param node - the AbstractNode to convert
+   * @param [transform] - the optional {string} transform, or the name of the node if no transform is specified. (optional, default: undefined)
+   * @param [opts] - an optional JSON that is passed as local variables to the template. (optional, default: undefined)
+   * @returns The {string} result from the delegate's convert method
+   * @memberof Converter/CompositeConverter
+   */
+  CompositeConverter.prototype.convert = function (node, transform, opts) {
+    return this.$convert(node, transform, toHash(opts))
+  }
+
+  /**
+   * Converts the {AbstractNode} using only its converted content.
+   *
+   * @param {AbstractNode} node
+   * @returns {string} - the converted {string} content.
+   * @memberof Converter/CompositeConverter
+   */
+  CompositeConverter.prototype.getContentOnly = function (node) {
+    return this.$content_only(node)
+  }
+
+  /**
+   * Skips conversion of the {AbstractNode}.
+   *
+   * @param {AbstractNode} node
+   * @memberof Converter/CompositeConverter
+   */
+  CompositeConverter.prototype.skip = function (node) {
+    this.$skip(node)
+  }
+
+  /**
+   * Get the Array of Converter objects in the chain.
+   * @returns {[Converter]}
+   * @memberof Converter/CompositeConverter
+   */
+  CompositeConverter.prototype.getConverters = function () {
+    return this.converters
+  }
+
+  /**
+   * Retrieve the converter for the specified transform.
+   * @param transform
+   * @returns {Converter|undefined}
+   * @memberof Converter/CompositeConverter
+   */
+  CompositeConverter.prototype.getConverter = function (transform) {
+    const converter = this.$converter_for(transform)
+    return converter === Opal.nil ? undefined : converter
+  }
+
+  /**
+   * Find the converter for the specified transform.
+   * Throw an exception if no converter is found.
+   *
+   * @param transform
+   * @returns {Converter} - the matching converter
+   * @throws Error if no converter is found
+   * @memberof Converter/CompositeConverter
+   */
+  CompositeConverter.prototype.findConverter = function (transform) {
+    return this.$find_converter(transform)
+  }
+}
+
+// Converter API
+
+/**
+ * @namespace
+ * @module Converter
+ */
+const Converter = Opal.const_get_qualified(Opal.Asciidoctor, 'Converter')
+
+// Alias
+Opal.Asciidoctor.Converter = Converter
+
+/**
+ * Convert the specified node.
+ *
+ * @param {AbstractNode} node - the AbstractNode to convert
+ * @param {string} transform - an optional String transform that hints at
+ * which transformation should be applied to this node.
+ * @param {Object} opts - a JSON of options that provide additional hints about how to convert the node (default: {})
+ * @returns the {Object} result of the conversion, typically a {string}.
+ * @memberof Converter
+ */
+Converter.prototype.convert = function (node, transform, opts) {
+  return this.$convert(node, transform, toHash(opts))
+}
+
+/**
+ * Create an instance of the converter bound to the specified backend.
+ *
+ * @param {string} backend - look for a converter bound to this keyword.
+ * @param {Object} opts - a JSON of options to pass to the converter (default: {})
+ * @returns {Converter} - a converter instance for converting nodes in an Asciidoctor AST.
+ * @memberof Converter
+ */
+Converter.create = function (backend, opts) {
+  return this.$create(backend, toHash(opts))
+}
+
+// Converter Factory API
+
+/**
+ * @namespace
+ * @module Converter/Factory
+ */
+const ConverterFactory = Opal.Asciidoctor.Converter.Factory
+
+const ConverterBase = Opal.Asciidoctor.Converter.Base
+
+// Alias
+Opal.Asciidoctor.ConverterFactory = ConverterFactory
+
+const ConverterBackendTraits = Opal.Asciidoctor.Converter.BackendTraits
+
+// Alias
+Opal.Asciidoctor.ConverterBackendTraits = ConverterBackendTraits
+
+/**
+ * Register a custom converter in the global converter factory to handle conversion to the specified backends.
+ * If the backend value is an asterisk, the converter is used to handle any backend that does not have an explicit converter.
+ *
+ * @param converter - The Converter instance to register
+ * @param backends {Array} - A {string} {Array} of backend names that this converter should be registered to handle (optional, default: ['*'])
+ * @return {*} - Returns nothing
+ * @memberof Converter/Factory
+ */
+ConverterFactory.register = function (converter, backends) {
+  const args = [bridgeConverter(converter)].concat(backends)
+  return Converter.$register.apply(Converter, args)
+}
+
+/**
+ * Retrieves the singleton instance of the converter factory.
+ *
+ * @param {boolean} initialize - instantiate the singleton if it has not yet
+ * been instantiated. If this value is false and the singleton has not yet been
+ * instantiated, this method returns a fresh instance.
+ * @returns {Converter/Factory} an instance of the converter factory.
+ * @memberof Converter/Factory
+ */
+ConverterFactory.getDefault = function (initialize) {
+  return this.$default(initialize)
+}
+
+/**
+ * Create an instance of the converter bound to the specified backend.
+ *
+ * @param {string} backend - look for a converter bound to this keyword.
+ * @param {Object} opts - a JSON of options to pass to the converter (default: {})
+ * @returns {Converter} - a converter instance for converting nodes in an Asciidoctor AST.
+ * @memberof Converter/Factory
+ */
+ConverterFactory.prototype.create = function (backend, opts) {
+  return this.$create(backend, toHash(opts))
+}
+
+/**
+ * Get the converter registry.
+ * @returns the registry of converter instances or classes keyed by backend name
+ * @memberof Converter/Factory
+ */
+ConverterFactory.getRegistry = function () {
+  return fromHash(Converter.$registry())
+}
+
+/**
+ * Lookup the custom converter registered with this factory to handle the specified backend.
+ *
+ * @param {string} backend - The {string} backend name.
+ * @returns the {Converter} class or instance registered to convert the specified backend or undefined if no match is found.
+ * @memberof Converter/Factory
+ */
+ConverterFactory.for = function (backend) {
+  const converter = Converter.$for(backend)
+  return converter === Opal.nil ? undefined : converter
+}
+
+/*
+ * Unregister any custom converter classes that are registered with this factory.
+ * Intended for testing only!
+ */
+ConverterFactory.unregisterAll = function () {
+  const internalRegistry = Converter.DefaultFactory.$$cvars['@@registry']
+  Converter.DefaultFactory.$$cvars['@@registry'] = toHash({ html5: internalRegistry['$[]']('html5') })
+}
+
+// Built-in converter
+
+/**
+ * @namespace
+ * @module Converter/Html5Converter
+ */
+const Html5Converter = Opal.Asciidoctor.Converter.Html5Converter
+
+// Alias
+Opal.Asciidoctor.Html5Converter = Html5Converter
+
+/**
+ * Create a new Html5Converter.
+ * @returns {Html5Converter} - a Html5Converter
+ * @memberof Converter/Html5Converter
+ */
+Html5Converter.create = function () {
+  return this.$new()
+}
+
+/**
+ * Converts an {AbstractNode} using the given transform.
+ * This method must be implemented by a concrete converter class.
+ *
+ * @param {AbstractNode} node - The concrete instance of AbstractNode to convert.
+ * @param {string} [transform] - An optional String transform that hints at which transformation should be applied to this node.
+ * If a transform is not given, the transform is often derived from the value of the {AbstractNode#getNodeName} property. (optional, default: undefined)
+ * @param {Object} [opts]- An optional JSON of options hints about how to convert the node. (optional, default: undefined)
+ *
+ * @returns {string} - the String result.
+ * @memberof Converter/Html5Converter
+ */
+Html5Converter.prototype.convert = function (node, transform, opts) {
+  return this.$convert(node, transform, opts)
 }
